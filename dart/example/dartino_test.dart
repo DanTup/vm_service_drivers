@@ -19,6 +19,7 @@ main(List<String> args) async {
     String bpId = await test.addBreakpoint(line: test.breakpointLine);
     for (int count = 0; count < 2; ++count) {
       await test.resume();
+      await test.resumed();
       Event event = await test.paused();
       if (event.kind != EventKind.kPauseBreakpoint) throw 'incorrect event';
       await test.verifyFrame(test.lastTopFrame);
@@ -29,6 +30,7 @@ main(List<String> args) async {
 
     for (int count = 0; count < 2; ++count) {
       await test.resume();
+      await test.resumed();
       await new Future.delayed(new Duration(milliseconds: 20));
       test.pause();
       Event event = await test.paused();
@@ -58,6 +60,8 @@ class DartinoDebugTest {
 
   Completer _paused;
   Event _lastPauseEvent;
+  Completer _resumed;
+  Event _lastResumeEvent;
   Frame lastTopFrame;
 
   void parseArgs(List<String> args) {
@@ -113,14 +117,26 @@ class DartinoDebugTest {
   /// Request that the VM pause.
   /// Return a future that completes when the request completes.
   pause({String isolateId}) async {
+    _resumed = new Completer();
     assertSuccess(
         await serviceClient.pause(isolateId ?? await mainIsolateId()));
   }
 
-  /// Return a future that completes when a "Pause*" event is received
-  /// or `null` if already paused and not yet resumed.
+  /// Return a future that completes when a "Pause*" event is received.
   Future<Event> paused() async =>
       _paused != null ? _paused.future : _lastPauseEvent;
+
+  /// Request that the VM pause.
+  /// Return a future that completes when the request completes.
+  resume([String isolateId]) async {
+    _paused = new Completer();
+    assertSuccess(
+        await serviceClient.resume(isolateId ?? await mainIsolateId()));
+  }
+
+  /// Return a future that completes when a "Resume" event is received.
+  Future<Event> resumed() async =>
+      _resumed != null ? _resumed.future : _lastResumeEvent;
 
   /// Start the debugging process and connect to the debugger.
   /// Return a future that completes when connected.
@@ -153,19 +169,8 @@ class DartinoDebugTest {
     serviceClient.onSend.listen((str) => print('--> ${str}'));
     serviceClient.onReceive.listen((str) => print('<-- ${str}'));
 
-    serviceClient.onIsolateEvent.listen((Event event) {
-      print('<-- isolate event: ${event}');
-      assertIsolateEvent(event);
-    });
-    serviceClient.onDebugEvent.listen((Event event) {
-      print('<-- debug event: ${event}');
-      assertDebugEvent(event);
-      if (event.kind.startsWith('Pause')) {
-        _paused?.complete(event);
-        lastTopFrame = event.topFrame;
-        _lastPauseEvent = event;
-      }
-    });
+    serviceClient.onIsolateEvent.listen(_handleIsolateEvent);
+    serviceClient.onDebugEvent.listen(_handleDebugEvent);
     // serviceClient.onGCEvent.listen((e) => print('onGCEvent: ${e}'));
     serviceClient.onStdoutEvent.listen((e) => print('<-- stdout: ${e}'));
     serviceClient.onStderrEvent.listen((e) => print('<-- stderr: ${e}'));
@@ -228,12 +233,6 @@ class DartinoDebugTest {
     return _mainScriptUri;
   }
 
-  resume([String isolateId]) async {
-    _paused = new Completer();
-    assertSuccess(
-        await serviceClient.resume(isolateId ?? await mainIsolateId()));
-  }
-
   verifyInstanceRef(InstanceRef ref, {String isolateId}) async {
     assertInstance(await serviceClient.getObject(
         isolateId ?? await mainIsolateId(), ref.id));
@@ -272,6 +271,27 @@ class DartinoDebugTest {
     for (var each in list) {
       await verifyVariable(each, isolateId: isolateId);
     }
+  }
+
+  _handleDebugEvent(Event event) {
+    print('<-- debug event: ${event}');
+    assertDebugEvent(event);
+    if (event.kind.startsWith('Pause')) {
+      _paused?.complete(event);
+      _paused = null;
+      lastTopFrame = event.topFrame;
+      _lastPauseEvent = event;
+    }
+    if (event.kind == EventKind.kResume) {
+      _resumed?.complete(event);
+      _resumed = null;
+      _lastResumeEvent = event;
+    }
+  }
+
+  _handleIsolateEvent(Event event) {
+    print('<-- isolate event: ${event}');
+    assertIsolateEvent(event);
   }
 }
 
