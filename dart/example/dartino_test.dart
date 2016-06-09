@@ -8,30 +8,28 @@ import 'package:vm_service_lib/vm_service_lib_io.dart';
 import 'vm_service_assert.dart';
 
 main(List<String> args) async {
-  if (args.length != 2) {
-    print('usage: dart example/dartino_test.dart'
-        ' </path/to/dartino/sdk> </path/to/dartino/samples/lines.dart>');
-    exit(1);
-  }
-  DartinoDebugTest test = new DartinoDebugTest(args[0], args[1]);
+  DartinoDebugTest test = new DartinoDebugTest();
+  test.parseArgs(args);
   await test.quit();
   // await test.downloadTools();
-  await test.flash();
+  await test.flashIfNecessary();
   try {
     await test.startDebugSession();
-    String bpId = await test.addBreakpoint(line: 85);
-    for (int count = 0; count < 20; ++count) {
+
+    String bpId = await test.addBreakpoint(line: test.breakpointLine);
+    for (int count = 0; count < 2; ++count) {
       await test.resume();
       Event event = await test.paused();
       if (event.kind != EventKind.kPauseBreakpoint) throw 'incorrect event';
       await test.verifyFrame(test.lastTopFrame);
       await test.verifyStack();
-      await new Future.delayed(new Duration(milliseconds: 250));
+      await new Future.delayed(new Duration(milliseconds: 20));
     }
     await test.removeBreakpoint(bpId);
-    for (int count = 0; count < 20; ++count) {
+
+    for (int count = 0; count < 2; ++count) {
       await test.resume();
-      await new Future.delayed(new Duration(milliseconds: 250));
+      await new Future.delayed(new Duration(milliseconds: 20));
       test.pause();
       Event event = await test.paused();
       if (event.kind != EventKind.kPauseInterrupted) throw 'incorrect event';
@@ -40,6 +38,8 @@ main(List<String> args) async {
       }
       await test.verifyStack();
     }
+
+    print('test complete');
   } finally {
     await test.quit();
   }
@@ -49,6 +49,8 @@ class DartinoDebugTest {
   String sdkPath;
   String appPath;
   String dartinoPath;
+  int breakpointLine;
+  String ttyPath;
 
   VmService serviceClient;
   List<IsolateRef> _isolateRefs;
@@ -58,12 +60,50 @@ class DartinoDebugTest {
   Event _lastPauseEvent;
   Frame lastTopFrame;
 
-  DartinoDebugTest(String sdkPath, this.appPath)
-      : this.sdkPath = sdkPath,
-        this.dartinoPath = '${sdkPath}/bin/dartino';
+  void parseArgs(List<String> args) {
+    showHelpAndExit([String message]) {
+      if (message != null) print(message);
+      print('Usage: dart example/dartino_test.dart'
+          ' </path/to/dartino/sdk> </path/to/dartino/app.dart>'
+          '<breakpoint-line-number> [on tty </dev/tty-path>]');
+      exit(1);
+    }
+    int index = 0;
+    String next(String expected) {
+      if (index == args.length) showHelpAndExit('Expected $expected');
+      return args[index++];
+    }
+    int nextInt(String expected) {
+      return int.parse(next(expected), onError: (String text) {
+        showHelpAndExit('Expected $expected but found "$text"');
+      });
+    }
+    expect(String expected) {
+      String text = next('"$expected"');
+      if (text != expected) {
+        showHelpAndExit('Expected "$expected" but found "$text"');
+      }
+    }
+    sdkPath = next('sdk path');
+    appPath = next('application path');
+    dartinoPath = '${sdkPath}/bin/dartino';
+    breakpointLine = nextInt('breakpoint line number');
+    if (index == args.length) return;
+    expect('on');
+    expect('tty');
+    ttyPath = next('tty path');
+    if (!ttyPath.startsWith('/dev/tty')) {
+      showHelpAndExit('expected tty path but found "${args[4]}"');
+    }
+    if (index == args.length) return;
+    showHelpAndExit('too many arguments');
+  }
 
   downloadTools() => run(dartinoPath, ['x-download-tools']);
-  flash() => run(dartinoPath, ['flash', '--debugging-mode', appPath]);
+  flashIfNecessary() {
+    if (ttyPath == null) return null;
+    return run(dartinoPath, ['flash', '--debugging-mode', appPath]);
+  }
   quit() {
     serviceClient?.dispose();
     serviceClient = null;
@@ -85,8 +125,9 @@ class DartinoDebugTest {
   /// Start the debugging process and connect to the debugger.
   /// Return a future that completes when connected.
   startDebugSession() async {
-    Process process = await start(
-        dartinoPath, ['debug', 'serve', appPath, 'on', 'tty', '/dev/ttyACM0']);
+    var args = ['debug', 'serve', appPath];
+    if (ttyPath != null) args.addAll(['on', 'tty', ttyPath]);
+    Process process = await start(dartinoPath, args);
 
     print('dartino process started');
 
